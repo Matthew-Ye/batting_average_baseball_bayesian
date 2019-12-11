@@ -1,0 +1,463 @@
+---
+title: "BDA - Final Project: Batting Average analysis in Baseball by Bayesian Analysis"
+output:
+  pdf_document: 
+    toc: yes
+    toc_depth: 2
+---
+
+
+```{r setup, include=FALSE}
+# This chunk just sets echo = TRUE as default (i.e. print all code)
+library("rstan") 
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+library(knitr)
+opts_chunk$set(cache = TRUE, warning = FALSE, message = FALSE)
+options(digits = 3)
+library(ggplot2)
+theme_set(theme_bw())
+```
+
+# 1. Introduction
+
+In our project, we are going to use bayesian analysis to select excellent baseball players according to battingg averages. We will use Empirical Bayes estimation, given prior parameters, pooled model and hierachical model.
+
+# 2. Problem Background
+We are going to find better baseball players based on their batting average (BA). In baseball, the *batting average (BA)* is the number of hits divided by at bats.
+$$BA=\frac{hits}{bats}=\frac{H}{AB}$$
+
+
+# 3. Data Description
+
+First, let's load the data. We’ll use the *Batting* dataset from the excellent [Lahman package](https://cran.r-project.org/web/packages/Lahman/index.html). The dataset provides the tables from the 'Sean Lahman Baseball Database' as a set of R data.frames. It uses the data on pitching, hitting and fielding performance and other tables from 1871 through 2018, as recorded in the 2019 version of the database.
+
+Here, we are going to do some data cleaning and processing and will focus on the numbers of hits and the numbers of bats.
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(Lahman)
+
+
+career <- Batting %>%
+  filter(AB > 0) %>%
+  anti_join(Pitching, by = "playerID") %>%
+  group_by(playerID) %>%
+  summarize(H = sum(H), AB = sum(AB)) %>%
+  mutate(average = H / AB)
+
+# use names along with the player IDs
+career <- Master %>%
+  tbl_df() %>%
+  select(playerID, nameFirst, nameLast) %>%
+  unite(name, nameFirst, nameLast, sep = " ") %>%
+  inner_join(career, by = "playerID") %>%
+  select(-playerID)
+
+data=career
+data
+```
+
+
+```{r lahman}
+library(dplyr)
+library(tidyr)
+library(Lahman)
+
+
+career <- Batting %>%
+  filter(AB > 0) %>%
+  anti_join(Pitching, by = "playerID") %>%
+  group_by(playerID) %>%
+  summarize(H = sum(H), AB = sum(AB)) %>%
+  mutate(average = H / AB)
+
+# use names along with the player IDs
+career <- Master %>%
+  tbl_df() %>%
+  select(playerID, nameFirst, nameLast) %>%
+  unite(name, nameFirst, nameLast, sep = " ") %>%
+  inner_join(career, by = "playerID") %>%
+  select(-playerID)
+
+data=career
+data
+```
+
+
+Image you are a baseball recruiter trying to find some players with good performances in the batting averages. Are you going to choose Hank Aaron with a BA at 0.400 or Harry Atkinson with a BA at 0.305? I bet almost everyone will choose Hank Aaron because the high BA of Hank might be due to luck. Hank, on the other hand, has a lot of evidence that he’s an high-average batter.
+
+```{r}
+Harry=data[ which(data$name=='Harry Atkinson'),]
+Hank=data[ which(data$name=='Hank Aaron'),]
+rbind(Harry,Hank)
+```
+
+In our project, we are going to use Bayes methods to estimate the proportion of success, starting from Empirical Bayes Estimation to standard bayes anlysis and Hierarchical Model.
+
+# 4. Model
+
+## 4.1 Empirical Bayes estimation
+Empirical Bayes methods are procedures for statistical inference in which the prior distribution is estimated from the data. We have different way to estimate the prior distribution. The first could be from the mean and variance of the batting average we have.
+
+From the formulas of $\mu$ and $\sigma$, we can get the expression of $\alpha$ and $\beta$ by $\mu$ and $\sigma$
+$$\mu=\frac{\alpha}{\beta}$$
+$$\sigma^2=\frac{\alpha \beta}{(\alpha+\beta)^2 (\alpha+\beta+1)}$$
+
+$$\alpha=(\frac{1-\mu}{\sigma^2} - \frac{1}{\mu}) \mu^2$$
+
+$$\beta = \alpha (\frac{1}{\mu}-1)$$
+
+
+Another way is maximum likelihood. We also choose to use this method in our project. We used the fitdistr function (fitdistr: Maximum-Likelihood Fitting Of Univariate Distributions) from ASS to calculate the prior alpha and beta.
+
+Considering the outliers which have very few batting counts, we fliter the data whose AB is no less than 1000.
+
+```{r}
+data_filtered <- career %>%
+    filter(AB >=1000)
+
+m <- MASS::fitdistr(data_filtered$average, dbeta,
+                    start = list(shape1 = 1, shape2 = 1))
+
+alpha0 <- m$estimate[1]
+beta0 <- m$estimate[2]
+cat("\nThe alpha0 is: ", alpha0)
+cat("\nThe beta0 is: ", beta0)
+
+```
+
+This comes up with $$\alpha_0=`r alpha0`$$ and $$\beta_0=`r beta0`$$. And we find the this prior parameters fit very well.
+
+```{r dependson = "mle", echo = FALSE}
+ggplot(data_filtered) +
+  geom_histogram(aes(average, y = ..density..), binwidth = .005) +
+  stat_function(fun = function(x) dbeta(x, alpha0, beta0), color = "red",
+                size = 1) +
+  xlab("Batting Average")
+```
+
+Having this beta prior distribution, it is easy to update our estimate batting average by using the following formula: $$BA\_estimate = \frac{H+alpha0}{AB+alpha0+beta0}$$
+
+
+```{r}
+data_ba <- data %>%
+    mutate(ba_estimate = (H + alpha0) / (AB + alpha0 + beta0))
+head(data_ba)
+```
+
+*Posterior predictive checking*
+Therefore, let's recap the previous case. The estiated BA of Harry is lower than Hank's although his actual average is higher. We will choose to recruit Hank according to the result.
+```{r}
+Harry=data_ba[ which(data_ba$name=='Harry Atkinson'),]
+Hank=data_ba[ which(data_ba$name=='Hank Aaron'),]
+rbind(Harry,Hank)
+```
+
+Finally, let's find the best 10 players according to our analysis.
+```{r}
+head(data_ba[order(-data_ba$ba_estimate),],10)
+```
+
+```{r, echo = FALSE}
+ggplot(data_ba, aes(average, ba_estimate, color = AB)) +
+  geom_hline(yintercept = alpha0 / (alpha0 + beta0), color = "red", lty = 2) +
+  geom_point() +
+  geom_abline(color = "red") +
+  scale_colour_gradient(trans = "log", breaks = 10 ^ (1:5)) +
+  xlab("Batting average") +
+  ylab("Empirical Bayes batting average")
+```
+
+This figure shows the shrinkage in Empirical Bayes estimation. If we have no evidence at all, we guess his/her BA is on the horizontal dashed read line  $$y=\frac{\alpha_0}{\alpha_0 + \beta_0}=`r sprintf("%.3f", alpha0 / (alpha0 + beta0))`$$
+While, with the increasing of AB, the BA tend to update and shrink to the red line$$x=y$$. All the estimates will move towards the average. How much it moves these estimates depends on how much evidence we have.
+
+## 4.2 Standard Bayesian Method
+
+### 4.2.1 Given prior parameters from fact
+In the last section, we use the data distribution as prior distribution. Here, let's give our prior parameters by ourselves. According to the statistic of batting gaming data, the average is around 0.266 from 0.21 to 0.35. So we just choose $\alpha=81, \beta=219$ to fit this requirement. We can find the result is similar but slightly different. And if we choose some improper prior such as uniform distribution, the result would have larger differences especially for those whose AB is low.
+
+
+```{r}
+alpha0=81
+beta0=219
+data_ba <- data %>%
+    mutate(ba_estimate = (H + alpha0) / (AB + alpha0 + beta0))
+head(data_ba[order(-data_ba$ba_estimate),],10)
+```
+
+# 4.2.2 pool model
+```{r}
+stan_model1<-'
+data {
+  int<lower=0> N; // number of palyers
+  vector<lower=0.0001>[N] theta;
+}
+
+parameters {
+  real<lower=0,upper=1> phi;
+  real<lower=0.1> lambda;
+}
+
+transformed parameters {
+  real<lower=0.0001> alpha = lambda * phi;
+  real<lower=0.0001> beta = lambda * (1 - phi);
+}
+
+model {
+  lambda ~ pareto(0.1, 1.5);
+  for (n in 1:N)
+    theta[n] ~ beta(alpha, beta);
+}
+'
+```
+
+```{r}
+data_model1<- list(
+  N=length(data_filtered$H),
+  theta=data_filtered$average
+)
+fit <- stan(model_code = stan_model1, data = data_model1)
+extract_model1 <- rstan::extract(fit, permuted = T)
+```
+```{r}
+N=length(data_filtered$H)
+alpha_pool=mean(extract_model1$alpha[2001:N])
+beta_pool=mean(extract_model1$beta[2001:N])
+data_ba <- data %>%
+    mutate(ba_estimate = (H + alpha_pool) / (AB + alpha_pool + beta_pool))
+head(data_ba[order(-data_ba$ba_estimate),],10)
+```
+### 4.2.3 hierachical model
+
+```{r}
+stan_model2<-'
+data {
+  int<lower=0> N; // number of players
+  vector<lower=0.0001>[N] theta;
+}
+
+parameters {
+  vector<lower=0,upper=1>[N] phi;
+  real<lower=0.1> lambda;
+}
+
+transformed parameters {
+  vector<lower=0.0001>[N] alpha = lambda * phi;
+  vector<lower=0.0001>[N] beta = lambda * (1 - phi);
+}
+
+model {
+  lambda ~ pareto(0.1, 1.5);
+  for (n in 1:N)
+    theta[n] ~ beta(alpha[n], beta[n]);
+}
+'
+```
+
+```{r}
+data_model2<- list(
+  N=length(data_filtered$H),
+  theta=data_filtered$average)
+
+fit2 <- stan(model_code = stan_model2, data = data_model2)
+```
+
+
+```{r}
+extract_model2 <- rstan::extract(fit2, permuted = T)
+```
+
+
+
+
+```{r}
+alpha_hierachical=apply(extract_model2$alpha[2001:4000,],2,mean)
+beta_hierachical=apply(extract_model2$beta[2001:4000,],2,mean)
+data_ba <- data_filtered %>%
+    mutate(alpha_hierachical) %>%
+    mutate(beta_hierachical) %>%
+    mutate(ba_estimate = (H + alpha_hierachical) / (AB + alpha_hierachical + beta_hierachical))
+head(data_ba[order(-data_ba$ba_estimate),],10)
+```
+
+
+
+# 5. Analysis of the results and model comparison
+Rhat is used to estimate the true convergence of the chains. The Rhat is used to evaluate the within-variance in each chain and the between-variance in different chains. Rhat is defined as:
+$$R=\sqrt{\frac{var^+}{W}}$$
+
+From the Rhat print by model itself, it is noticed that Rhat of alpha and beta are smaller than 1. Thus, the model converge and the generated samples of alpha and beta are safe to use.
+
+## 5.1 Convergence diagnostics (Rhat, divergences, ESS)
+### 5.1.1 convergence of pool model
+```{r}
+print(fit)
+```
+
+Both bulk-ESS and tail-ESS should be at least 100 (approximately) per Markov Chain in order to be reliable and indicate that estimates of respective posterior quantiles are reliable.
+Rhat and effective sample size n_eff are included in the fitting results as above.
+Rhat here are all 1 which means we can believe the model converges well.
+
+### 5.1.2 convergence of hierachical model
+```{r}
+t1<-extract_model2$alpha[1:1000,]
+t2<-extract_model2$alpha[1001:2000,]
+t3<-extract_model2$alpha[2001:3000,]
+t4<-extract_model2$alpha[3001:4000,]
+alpha_post_warmup<-matrix(c(t1[1],t2[1],t3[1],t4[1]),1000,4)
+cat("the Rhat of alpha in 4 chains is:",Rhat(alpha_post_warmup), "\n")
+cat("the EFF of alpha in 4 chains is:",ess_bulk(alpha_post_warmup))
+
+```
+
+
+```{r}
+t1<-extract_model2$beta[1:1000,]
+t2<-extract_model2$beta[1001:2000,]
+t3<-extract_model2$beta[2001:3000,]
+t4<-extract_model2$beta[3001:4000,]
+beta_post_warmup<-matrix(c(t1[1],t2[1],t3[1],t4[1]),1000,4)
+cat("the Rhat of beta in 4 chains is:",Rhat(beta_post_warmup),"\n")
+cat("the EFF of alpha in 4 chains is:",ess_bulk(beta_post_warmup))
+
+```
+
+Both bulk-ESS and tail-ESS should be at least 100 (approximately) per Markov Chain in order to be reliable and indicate that estimates of respective posterior quantiles are reliable.
+Besides, Rhat and effective sample size n_eff are also included in the fitting results as above. Rhat here are all 1 < 1.05 which means we can believe the model converges well.
+
+## 5.2 Posterior predictive checking
+The posterior predictive checking are mentioned in the part 3 and 4.
+
+# 6. Sensitivity analysis with respect to prior choices
+
+## 6.1 Sensitivity analysis of randomly initialized prior
+The sensitivity of posterior inference about BA estimation to the proposed prior distribution is exhibited in Table. The first column $phi$ is the parameter of the prior distribution $\alpha + \beta$. The second column is the mean of prior distribution $lambda$, which is calculated by $\alpha/\alpha + \beta$. Here we fixed $lambda$, which is the mean of prior distribution. 
+
+Here, we choose 3 different values of $\alpha+\beta$ ($phi$): $phi1$, $phi2$, $phi3$ , and hope to find the trend variation of posterior inference about BA estimation, which are corresponding to $ba_estimate$, $ba_estimate1$ and $ba_estimate2$.
+
+The following three tables are ordered by these three difefrent BA estimation: $ba_estimate$, $ba_estimate1$ and $ba_estimate2$.
+
+Then we can find, as $\alpha+\beta$ ($phi$) is growing, the estimation of posterior is more closely to the prior $lambda$:
+```{r}
+alpha0=81
+beta0=219
+phi=alpha0+beta0
+lambda=alpha0/phi
+alpha1=alpha0*2
+beta1=beta0*2
+alpha2=alpha0*10
+beta2=beta0*10
+data_ba <- data %>%
+    mutate(ba_estimate = (H + alpha_pool) / (AB + alpha_pool + beta_pool))
+data_ba <- data_ba %>%
+    mutate(ba_estimate1 = (H + alpha1) / (AB + alpha1 + beta1))
+data_ba <- data_ba %>%
+    mutate(ba_estimate2 = (H + alpha2) / (AB + alpha2 + beta2))
+data_ba <- data_ba %>%
+    mutate(phi = phi)
+data_ba <- data_ba %>%
+    mutate(phi1 = phi*2)
+data_ba <- data_ba %>%
+    mutate(phi2 = phi*10)
+data_ba <- data_ba %>%
+    mutate(lambda = lambda)
+head(data_ba[order(-data_ba$ba_estimate),],10)
+head(data_ba[order(-data_ba$ba_estimate1),],10)
+head(data_ba[order(-data_ba$ba_estimate2),],10)
+
+```
+
+## 6.2 Sensitivity analysis of pooled model prior
+
+```{r}
+phi=alpha_pool+beta_pool
+lambda=alpha_pool/phi
+alpha1=alpha_pool*2
+beta1=beta_pool*2
+alpha2=alpha_pool*10
+beta2=beta_pool*10
+data_ba <- data %>%
+    mutate(ba_estimate = (H + alpha_pool) / (AB + alpha_pool + beta_pool))
+data_ba <- data_ba %>%
+    mutate(ba_estimate1 = (H + alpha1) / (AB + alpha1 + beta1))
+data_ba <- data_ba %>%
+    mutate(ba_estimate2 = (H + alpha2) / (AB + alpha2 + beta2))
+data_ba <- data_ba %>%
+    mutate(phi = phi)
+data_ba <- data_ba %>%
+    mutate(phi1 = phi*2)
+data_ba <- data_ba %>%
+    mutate(phi2 = phi*10)
+data_ba <- data_ba %>%
+    mutate(lambda = lambda)
+head(data_ba[order(-data_ba$ba_estimate),],10)
+head(data_ba[order(-data_ba$ba_estimate1),],10)
+head(data_ba[order(-data_ba$ba_estimate2),],10)
+
+```
+
+## 6.3 Sensitivity analysis of hierachical model prior
+```{r}
+alpha_hierachical=apply(extract_model2$alpha[2001:4000,],2,mean)
+beta_hierachical=apply(extract_model2$beta[2001:4000,],2,mean)
+phi=alpha_hierachical+beta_hierachical
+lambda=alpha_hierachical/phi
+alpha1=alpha_hierachical*2
+beta1=beta_hierachical*2
+alpha2=alpha_hierachical*10
+beta2=beta_hierachical*10
+data_ba <- data_filtered %>%
+    mutate(alpha_hierachical) %>%
+    mutate(beta_hierachical) %>%
+    mutate(ba_estimate = (H + alpha_hierachical) / (AB + alpha_hierachical + beta_hierachical))
+data_ba <- data_ba %>%
+    mutate(ba_estimate1 = (H + alpha1) / (AB + alpha1 + beta1))
+data_ba <- data_ba %>%
+    mutate(ba_estimate2 = (H + alpha2) / (AB + alpha2 + beta2))
+data_ba <- data_ba %>%
+    mutate(phi = phi)
+data_ba <- data_ba %>%
+    mutate(phi1 = phi*2)
+data_ba <- data_ba %>%
+    mutate(phi2 = phi*10)
+data_ba <- data_ba %>%
+    mutate(lambda = lambda)
+head(data_ba[order(-data_ba$ba_estimate),],10)
+head(data_ba[order(-data_ba$ba_estimate1),],10)
+head(data_ba[order(-data_ba$ba_estimate2),],10)
+```
+
+## 6.4 Comparison of sensitivity analysis of 3 prior model
+|parameters of randomly initialized prior distribution:$\alpha+\beta$| $\alpha/\alpha+\beta$        |top1        |ba_estimate|
+|:----------|:-------------|:-------------    |:-------------    |
+300|                        0.27            |Rogers Hornsby      |0.354
+600|                        0.27           |Rogers Hornsby       |0.352
+3000|                        0.27           |Rogers Hornsby      |0.335
+
+
+|parameters of pooled method prior distribution:$\alpha+\beta$| $\alpha/\alpha+\beta$        |top1        |ba_estimate|
+|:----------|:-------------|:-------------    |:-------------    |
+367|                        0.264            |Rogers Hornsby      |0.354
+734|                        0.264           |Rogers Hornsby       |0.351
+3672|                        0.264           |Rogers Hornsby      |0.329
+
+|parameters of hierachical model prior distribution:$\alpha+\beta$| $\alpha/\alpha+\beta$        |top1        |ba_estimate|
+|:----------|:-------------|:-------------    |:-------------    |
+3201|                        unchanged for each individual            |Rogers Hornsby      |0.359
+6401|                        unchanged for each individual           |Rogers Hornsby       |0.359
+32006|                       unchanged for each individual           |Rogers Hornsby       |0.359
+
+The sensitivity of posterior inference about $\pi$ to the proposed prior distribution is exhibited in Table. The first column is the parameter of the prior distribution $\alpha + \beta$. The second column is the mean of prior distribution, which is calculated by $\alpha/\alpha + \beta$. Here we fixed the mean of prior distribution. Then we can find, as $\alpha+\beta$ is growing, the estimation of posterior is more closely to the prior:
+$$
+E(\pi|y) -> E(\pi)
+$$
+Thus, the amount of prior information is measured by $\alpha + \beta$. Posterior inferences are not particularly sensitive to the prior distribution. 
+
+From the table we can deduce that, hierachical model is the most stabel one of the three models we used. Since its order is most stable and the BA estimations of the top 1 is also most stable.
+
+# 7. Discussion and Conclusion
+Discussion of problems, and potential improvements
+Here, compare the different model, the top ten players selected by different models are similar. The hierachical mode can provide a more stable result, with nearly unchanged order when we increase $\alpha+\beta$. However, this may be due to the fact that in the dataset, each person only have one data point of average. This will lead to the fact that the simulated $ba_estimate$ is quite similar to the average of each person. Therefore, we hope to get more average data of each person to further improve this model.
+
